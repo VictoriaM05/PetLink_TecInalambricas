@@ -1,0 +1,428 @@
+import serial                        
+import serial.tools.list_ports       # Detectar puertos COM
+import time
+import csv                           
+import datetime
+import tkinter as tk                 
+from tkinter import ttk, messagebox
+import threading                     
+import pandas as pd
+
+
+class NFC_Registrador:
+
+    def __init__(self):
+
+        # Crear ventana principal
+        self.root = tk.Tk()
+
+        self.root.title("PetLink")
+        self.root.geometry("1000x720")
+
+        self.ser = None
+        self.leyendo = False
+
+        # Archivo donde se guardan registros
+        self.archivo_csv = "collares_registrados.csv"
+
+        # Variables de conexión
+        self.puerto_var = tk.StringVar()
+        self.baud_var = tk.StringVar(value="115200")
+
+        # Variables para información NFC
+        self.uid_actual = None
+        self.texto_actual = ""
+        self.mensaje_pendiente = None
+
+        self.crear_interfaz()
+
+        # Buscar puertos disponibles
+        self.cargar_puertos()
+
+        # Crear archivo CSV
+        self.crear_csv()
+
+
+    # ===== INTERFAZ =====
+    def crear_interfaz(self):
+
+        # Configuración
+        frame = ttk.LabelFrame(self.root, text="Configuración")
+        frame.pack(fill="x", padx=10, pady=10)
+
+        # Selección de puerto
+        ttk.Label(frame, text="Puerto:").grid(row=0, column=0)
+
+        self.combo = ttk.Combobox(frame, textvariable=self.puerto_var)
+        self.combo.grid(row=0, column=1)
+
+        # Botón actualizar puertos
+        ttk.Button(
+            frame,
+            text="Actualizar",
+            command=self.cargar_puertos
+        ).grid(row=0, column=2)
+
+        # Botón conectar/desconectar
+        ttk.Button(
+            self.root,
+            text="Conectar",
+            command=self.toggle
+        ).pack(pady=10)
+
+        # Área de texto para mostrar información
+        self.log_text = tk.Text(self.root, height=30)
+
+        self.log_text.pack(
+            fill="both",
+            expand=True,
+            padx=10,
+            pady=10
+        )
+
+
+    # ===== CREAR CSV =====
+    def crear_csv(self):
+
+        try:
+            open(self.archivo_csv, 'r').close()
+
+        except:
+            with open(
+                self.archivo_csv,
+                'w',
+                newline='',
+                encoding='utf-8'
+            ) as f:
+
+                writer = csv.writer(f)
+
+                # Encabezados del archivo
+                writer.writerow([
+                    "Fecha",
+                    "UID",
+                    "Mensaje"
+                ])
+
+
+    # ===== BUSCAR PUERTOS =====
+    def cargar_puertos(self):
+
+        # Obtener lista de puertos COM
+        puertos = [
+            p.device
+            for p in serial.tools.list_ports.comports()
+        ]
+
+        self.combo["values"] = puertos
+
+        # Seleccionar primero automáticamente
+        if puertos:
+            self.puerto_var.set(puertos[0])
+
+
+    # ===== MOSTRAR MENSAJES =====
+    def log(self, msg):
+
+        # Hora actual
+        hora = datetime.datetime.now().strftime("%H:%M:%S")
+
+        # Mostrar mensaje en pantalla
+        self.log_text.insert(
+            "end",
+            f"[{hora}] {msg}\n"
+        )
+
+        self.log_text.see("end")
+
+
+    # ===== CONECTAR / DESCONECTAR =====
+    def toggle(self):
+
+        if self.leyendo:
+            self.desconectar()
+
+        else:
+            self.conectar()
+
+
+    # ===== CONECTAR SERIAL =====
+    def conectar(self):
+
+        try:
+
+            # Abrir puerto serial
+            self.ser = serial.Serial(
+                self.puerto_var.get(),
+                115200,
+                timeout=1
+            )
+
+            time.sleep(2)
+
+            self.leyendo = True
+
+            self.log("Conectado")
+
+            threading.Thread(
+                target=self.leer_serial,
+                daemon=True
+            ).start()
+
+        except Exception as e:
+
+            messagebox.showerror(
+                "Error",
+                str(e)
+            )
+
+
+    # ===== DESCONECTAR =====
+    def desconectar(self):
+
+        self.leyendo = False
+
+        if self.ser:
+            self.ser.close()
+
+
+    # ===== LEER DATOS SERIAL =====
+    def leer_serial(self):
+
+        while self.leyendo:
+
+            try:
+
+                while self.ser.in_waiting:
+
+                    # Leer línea enviada por ESP32
+                    linea = self.ser.readline() \
+                        .decode('utf-8', errors='ignore') \
+                        .strip()
+
+                    if not linea:
+                        continue
+
+
+                    # Detectar texto leído
+                    elif "TEXTO_ACTUAL:" in linea:
+
+                        self.texto_actual = linea.split(":", 1)[1].strip()
+
+                        self.log(
+                            "----- INFORMACIÓN DEL COLLAR -----"
+                        )
+
+                        # Mostrar información guardada
+                        if self.texto_actual:
+
+                            partes = self.texto_actual.split("|")
+
+                            nombres_etiquetas = {
+                                "Nombre": "Nombre del Perrito",
+                                "Dueño": "Nombre del Dueño",
+                                "Telefono": "Teléfono",
+                                "Direccion": "Dirección",
+                                "Vacunas": "Vacunas",
+                                "Observaciones": "Observaciones"
+                            }
+
+                            for parte in partes:
+
+                                if ":" in parte:
+
+                                    campo, valor = parte.split(":", 1)
+
+                                    campo_mostrar = \
+                                        nombres_etiquetas.get(
+                                            campo,
+                                            campo
+                                        )
+
+                                    self.log(
+                                        f"{campo_mostrar:<25} {valor}"
+                                    )
+
+                        else:
+                            self.log(
+                                "Sin información registrada"
+                            )
+
+                        self.log(
+                            "----------------------------------"
+                        )
+
+
+                    # Abrir ventana de edición
+                    elif "ESPERANDO_MENSAJE" in linea:
+
+                        self.log("Listo para editar")
+
+                        self.root.after(
+                            0,
+                            self.editar
+                        )
+
+
+                    # Confirmación de guardado
+                    elif "TEXTO ACTUALIZADO" in linea:
+
+                        self.log("Guardado correctamente!")
+
+                        self.guardar_csv()
+
+                    else:
+                        self.log(linea)
+
+                time.sleep(0.05)
+
+            except Exception as e:
+
+                self.log(f"Error serial: {e}")
+
+                break
+
+
+    # ===== VENTANA EDITAR =====
+    def editar(self):
+
+        # Crear nueva ventana
+        ventana = tk.Toplevel(self.root)
+
+        ventana.title("Collar NFC")
+
+        ventana.geometry("450x500")
+
+        campos = {}
+
+        # Campos de información
+        etiquetas = {
+            "Nombre": "Nombre del Perrito",
+            "Dueño": "Nombre del Dueño",
+            "Telefono": "Teléfono",
+            "Direccion": "Dirección",
+            "Vacunas": "Vacunas",
+            "Observaciones": "Observaciones"
+        }
+
+        datos_existentes = {}
+
+        # Cargar información actual
+        if self.texto_actual:
+
+            partes = self.texto_actual.split("|")
+
+            for parte in partes:
+
+                if ":" in parte:
+
+                    k, v = parte.split(":", 1)
+
+                    datos_existentes[k] = v
+
+
+        for clave, texto in etiquetas.items():
+
+            tk.Label(
+                ventana,
+                text=texto,
+                font=("Arial", 10, "bold")
+            ).pack()
+
+            entry = tk.Entry(
+                ventana,
+                width=45
+            )
+
+            entry.pack(pady=5)
+
+            # Mostrar datos existentes
+            if clave in datos_existentes:
+                entry.insert(0, datos_existentes[clave])
+
+            campos[clave] = entry
+
+
+        # ===== GUARDAR DATOS =====
+        def guardar():
+
+            datos = []
+
+            for clave in etiquetas:
+
+                valor = campos[clave].get().strip()
+
+                datos.append(f"{clave}:{valor}")
+
+            # Unir datos en un solo texto
+            mensaje = "|".join(datos)
+
+            self.mensaje_pendiente = mensaje
+
+            # Enviar a ESP32
+            self.ser.write(
+                f"ESCRIBIR:{mensaje}\n".encode()
+            )
+
+            self.log("Datos enviados")
+
+            ventana.destroy()
+
+
+        # ===== ELIMINAR DATOS =====
+        def eliminar():
+
+            self.mensaje_pendiente = ""
+
+            self.ser.write("ESCRIBIR:\n".encode())
+
+            self.log("Datos eliminados")
+
+            ventana.destroy()
+
+
+        # Botones
+        tk.Button(
+            ventana,
+            text="Guardar",
+            command=guardar
+        ).pack(pady=10)
+
+        tk.Button(
+            ventana,
+            text="Eliminar",
+            command=eliminar
+        ).pack(pady=10)
+
+
+    # ===== GUARDAR EN CSV =====
+    def guardar_csv(self):
+
+        with open(
+            self.archivo_csv,
+            'a',
+            newline='',
+            encoding='utf-8'
+        ) as f:
+
+            writer = csv.writer(f)
+
+            writer.writerow([
+                datetime.datetime.now().strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                ),
+                self.uid_actual,
+                self.mensaje_pendiente
+            ])
+
+
+    def run(self):
+
+        self.root.mainloop()
+
+
+if __name__ == "__main__":
+
+    app = NFC_Registrador()
+
+    app.run()
