@@ -1,0 +1,161 @@
+#include <SPI.h>                 
+#include <Adafruit_PN532.h>      
+
+#define PN532_SCK   14
+#define PN532_MISO  12
+#define PN532_MOSI  13
+#define PN532_SS    5
+
+Adafruit_PN532 nfc(PN532_SCK, PN532_MISO, PN532_MOSI, PN532_SS);
+
+void setup() {
+
+  Serial.begin(115200);
+
+  Serial.println("\n=== Iniciando ===");
+
+  // Iniciar módulo NFC
+  nfc.begin();
+
+  // Verificar si el PN532 está conectado
+  uint32_t versiondata = nfc.getFirmwareVersion();
+
+  if (!versiondata) {
+    Serial.println("No se encontró PN532");
+    while (1);
+  }
+
+  Serial.println("PN532 detectado correctamente");
+
+  // Configuración del lector NFC
+  nfc.SAMConfig();
+
+  Serial.println("Listo para escanear...");
+}
+
+void loop() {
+
+  // Variables para guardar UID de la tarjeta
+  uint8_t uid[7];
+  uint8_t uidLength;
+
+  // Detectar tarjeta NFC
+  if (nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, 250)) {
+
+    Serial.println("\n=== COLLAR DETECTADO ===");
+
+    // Leer texto almacenado en la tarjeta
+    String textoActual = leerTextoDeTarjeta(uid, uidLength);
+
+    // Enviar información a Python
+    Serial.print("TEXTO_ACTUAL:");
+    Serial.println(textoActual);
+
+    Serial.println("ESPERANDO_MENSAJE");
+
+    String comando = "";
+
+    // Esperar mensaje desde Python
+    while (comando.length() == 0) {
+      if (Serial.available()) {
+        comando = Serial.readStringUntil('\n');
+      }
+      delay(10);
+    }
+
+    comando.trim();
+
+    // Si llega un mensaje de escritura
+    if (comando.startsWith("ESCRIBIR:")) {
+
+      // Obtener texto nuevo
+      String nuevoMensaje = comando.substring(9);
+
+      // Guardar texto en la tarjeta NFC
+      escribirEnTarjeta(uid, uidLength, nuevoMensaje);
+    }
+
+    delay(1500);
+  }
+}
+
+
+// ===== FUNCIÓN PARA LEER TEXTO =====
+String leerTextoDeTarjeta(uint8_t *uid, uint8_t uidLen) {
+
+  // Clave por defecto de autenticación
+  uint8_t key[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+
+  String texto = "";
+
+  // Bloques donde se guarda la información
+  uint8_t bloques[] = {4,5,6,8,9,10,12,13,14};
+
+  // Recorrer cada bloque
+  for (int b = 0; b < 9; b++) {
+
+    uint8_t block = bloques[b];
+    uint8_t data[16];
+
+    // Autenticar bloque
+    if (!nfc.mifareclassic_AuthenticateBlock(uid, uidLen, block, 0, key))
+      continue;
+
+    // Leer datos del bloque
+    if (!nfc.mifareclassic_ReadDataBlock(block, data))
+      continue;
+
+    // Convertir bytes a texto
+    for (int i = 0; i < 16; i++) {
+      if (data[i] != 0)
+        texto += (char)data[i];
+    }
+  }
+
+  return texto;
+}
+
+
+// ===== FUNCIÓN PARA ESCRIBIR TEXTO =====
+void escribirEnTarjeta(uint8_t *uid, uint8_t uidLen, String mensaje) {
+
+  // Clave de autenticación
+  uint8_t key[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+
+  // Bloques de memoria usados
+  uint8_t bloques[] = {4,5,6,8,9,10,12,13,14};
+
+  int index = 0;
+
+  // Recorrer bloques
+  for (int b = 0; b < 9; b++) {
+
+    uint8_t block = bloques[b];
+
+    // Autenticar bloque
+    if (!nfc.mifareclassic_AuthenticateBlock(uid, uidLen, block, 0, key)) {
+      Serial.println("ERROR_AUTENTICACION");
+      return;
+    }
+
+    uint8_t data[16] = {0};
+
+    // Guardar texto en bloques de 16 bytes
+    for (int i = 0; i < 16; i++) {
+
+      if (index < mensaje.length()) {
+        data[i] = mensaje[index++];
+      } else {
+        data[i] = 0;
+      }
+    }
+
+    // Escribir bloque
+    if (!nfc.mifareclassic_WriteDataBlock(block, data)) {
+      Serial.println("ERROR_ESCRITURA");
+      return;
+    }
+  }
+
+  Serial.println("TEXTO ACTUALIZADO");
+}
